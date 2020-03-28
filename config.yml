@@ -1,14 +1,14 @@
 main:
-    manage_docker: true
-    preprocess_kb: true
-    import_kb_graphdb: true
-    import_kb_solr: true
-    import_dataset_mongodb: true
-    compute_term_freq_indexes: true
-    compute_page_entities: true
-    topic_identification: true
-    compute_candidate_pred_obj_pairs: true
-    compute_seed_labels: true
+    manage_docker: false
+    preprocess_kb: false
+    import_kb_graphdb: false
+    import_kb_solr: false
+    import_dataset_mongodb: false
+    compute_term_freq_indexes: false
+    compute_page_entities: false
+    topic_identification: false
+    compute_candidate_pred_obj_pairs: false
+    compute_seed_labels: false
     label_propagation: true
     save_new_labels_in_kb: false
     crowdsourcing: false
@@ -26,8 +26,8 @@ swde:                                                                       # sw
     debug: true
     domain:
         - movie
-    sites: ['imdb', 'allmovie', 'hollywood', 'iheartmovies']                # (default:[])
-    max_number_of_webpages: 44                                              # (default:0) foreach domain
+    sites: ['imdb', 'allmovie'] #, 'hollywood', 'iheartmovies']                # (default:[])
+    max_number_of_webpages: 22                                              # (default:0) foreach domain
     topics_to_import: []                                                    # select only webpages that have one of this topics as subject (default:[])
 
 monitor:                                                                    # monitor dataset importer configs

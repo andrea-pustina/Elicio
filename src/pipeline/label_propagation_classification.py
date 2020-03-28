@@ -167,11 +167,7 @@ def get_max_distance_feature_value(page_service, template):
     return curr_max_distance
 
 
-def propagate_labels(page_service, cfg, webpage_index):
-    print('propagating labels...')
-    templates = page_service.get_all_field_values('template')
-    # templates = ['monitor-www.nexus-t.co.uk', 'monitor-www.pc-canada.com']
-
+def get_html_tag_encoder(page_service):
     # get html element tag encoder  (tags: div, br, p, ...)
     all_xpaths = []
     for webpage in page_service.get_all():
@@ -192,13 +188,81 @@ def propagate_labels(page_service, cfg, webpage_index):
 
         all_tags.update(tags)
 
-    #print(all_tags)
-
     tag_encoder = preprocessing.LabelEncoder()
     tag_encoder.fit(list(all_tags))
 
-    #print(tag_encoder.classes_)
+    # print(all_tags)
+    # print(tag_encoder.classes_)
+    return tag_encoder
 
+
+def get_webpage_seeds_labels(candidate_pairs, webpage):
+    # get seed vertices (seed labels)
+    seeds = []
+    for obj_xpath, obj_metadata in webpage['seed_labels'].items():
+        try:
+            pred_xpath = obj_metadata['pred']
+
+            obj_features = candidate_pairs[obj_xpath]['obj_features']
+            pred_features = candidate_pairs[obj_xpath]['candidate_preds'][pred_xpath]['pred_features']
+
+            obj_text = candidate_pairs[obj_xpath]['obj_text']
+            pred_text = candidate_pairs[obj_xpath]['candidate_preds'][pred_xpath]['pred_text']
+
+            seeds.append({'class': 1, 'obj_xpath': obj_xpath, 'obj_features': obj_features, 'pred_xpath': pred_xpath,
+                          'pred_features': pred_features, 'obj_text': obj_text, 'pred_text': pred_text})
+        except KeyError:
+            print('seed label dropped')
+
+    # get not seed vertices
+    not_seeds = []
+    for seed in seeds:
+        seed_obj_xpath = seed['obj_xpath']
+        seed_pred_xpath = seed['pred_xpath']
+
+        obj_features = candidate_pairs[seed_obj_xpath]['obj_features']
+        obj_text = candidate_pairs[seed_obj_xpath]['obj_text']
+
+        # for seed obj get all preds that are not the pred of the seed label
+        for candidate_pred_xpath, candidate_pred_metadata in candidate_pairs[seed_obj_xpath]['candidate_preds'].items():
+            if candidate_pred_xpath != seed_pred_xpath:
+                pred_features = candidate_pred_metadata['pred_features']
+                pred_text = candidate_pred_metadata['pred_text']
+
+                not_seeds.append({'class': 0, 'obj_xpath': seed_obj_xpath, 'obj_features': obj_features,
+                                  'pred_xpath': seed_pred_xpath, 'pred_features': pred_features, 'obj_text': obj_text,
+                                  'pred_text': pred_text})
+
+        # get seed_obj-pred pairs where pred!=seed_pred
+        for i in range(0, 5):
+            random_obj_xpath = random.choice(list(candidate_pairs.keys()))
+            if random_obj_xpath != seed_obj_xpath:
+                random_pred_xpath = random.choice(list(candidate_pairs[random_obj_xpath]['candidate_preds'].keys()))
+                if random_pred_xpath != seed_pred_xpath:
+                    pred_features = candidate_pairs[random_obj_xpath]['candidate_preds'][random_pred_xpath][
+                        'pred_features']
+                    pred_text = candidate_pairs[random_obj_xpath]['candidate_preds'][random_pred_xpath]['pred_text']
+
+                    not_seeds.append({'class': 0, 'obj_xpath': seed_obj_xpath, 'obj_features': obj_features,
+                                      'pred_xpath': random_pred_xpath, 'pred_features': pred_features,
+                                      'obj_text': obj_text, 'pred_text': pred_text})
+
+    # print('   {}'.format(webpage['topic_text']))
+    # print('      template: {}'.format(template))
+    # print('      file: {}'.format(webpage['file_name']))
+    # print('      seed: {}'.format([(seed['obj_text'], seed['pred_text']) for seed in seeds]))
+    # print('      not_seed: {}'.format([(not_seed['obj_text'], not_seed['pred_text']) for not_seed in not_seeds]))
+
+    page_training = seeds + not_seeds
+    return page_training
+
+
+def propagate_labels(page_service, cfg, webpage_index):
+    print('propagating labels...')
+    templates = page_service.get_all_field_values('template')
+    # templates = ['monitor-www.nexus-t.co.uk', 'monitor-www.pc-canada.com']
+
+    tag_encoder = get_html_tag_encoder(page_service)
 
     for template in templates:
 
@@ -211,65 +275,11 @@ def propagate_labels(page_service, cfg, webpage_index):
 
             parsed_page = ParsedPage(webpage['html'])
 
-            # get list of candidate pred-obj pairs
-            # candidate_pairs = {obj_xpath: {obj_text: 'avatar', obj_features: {...}, candidate_preds: {pred_xpath: {pred_text: 'film', pred_features: {...}}, ... } }}
+            # get list of candidate pred-obj pairs -> candidate_pairs = {obj_xpath: {obj_text: 'avatar', obj_features: {...}, candidate_preds: {pred_xpath: {pred_text: 'film', pred_features: {...}}, ... } }}
             candidate_pairs = get_candidate_pred_obj_pairs(webpage, parsed_page)
 
-
-            # get seed vertices (seed labels)
-            seeds = []
-            for obj_xpath, obj_metadata in webpage['seed_labels'].items():
-                try:
-                    pred_xpath = obj_metadata['pred']
-
-                    obj_features = candidate_pairs[obj_xpath]['obj_features']
-                    pred_features = candidate_pairs[obj_xpath]['candidate_preds'][pred_xpath]['pred_features']
-
-                    obj_text = candidate_pairs[obj_xpath]['obj_text']
-                    pred_text = candidate_pairs[obj_xpath]['candidate_preds'][pred_xpath]['pred_text']
-
-                    seeds.append({'class': 1, 'obj_xpath': obj_xpath, 'obj_features': obj_features, 'pred_xpath': pred_xpath, 'pred_features': pred_features, 'obj_text': obj_text, 'pred_text': pred_text})
-                except KeyError:
-                    print('seed label dropped')
-
-            # get not seed vertices
-            not_seeds = []
-            for seed in seeds:
-                seed_obj_xpath = seed['obj_xpath']
-                seed_pred_xpath = seed['pred_xpath']
-
-                obj_features = candidate_pairs[seed_obj_xpath]['obj_features']
-                obj_text = candidate_pairs[seed_obj_xpath]['obj_text']
-
-                # for seed obj get all preds that are not the pred of the seed label
-                for candidate_pred_xpath, candidate_pred_metadata in candidate_pairs[seed_obj_xpath]['candidate_preds'].items():
-                    if candidate_pred_xpath != seed_pred_xpath:
-                        pred_features = candidate_pred_metadata['pred_features']
-                        pred_text = candidate_pred_metadata['pred_text']
-
-                        not_seeds.append({'class': 0, 'obj_xpath': seed_obj_xpath, 'obj_features': obj_features, 'pred_xpath': seed_pred_xpath, 'pred_features': pred_features, 'obj_text': obj_text, 'pred_text': pred_text})
-
-                # get seed_obj-pred pairs where pred!=seed_pred
-                for i in range(0, 5):
-                    random_obj_xpath = random.choice(list(candidate_pairs.keys()))
-                    if random_obj_xpath != seed_obj_xpath:
-                        random_pred_xpath = random.choice(list(candidate_pairs[random_obj_xpath]['candidate_preds'].keys()))
-                        if random_pred_xpath != seed_pred_xpath:
-                            pred_features = candidate_pairs[random_obj_xpath]['candidate_preds'][random_pred_xpath]['pred_features']
-                            pred_text = candidate_pairs[random_obj_xpath]['candidate_preds'][random_pred_xpath]['pred_text']
-
-                            not_seeds.append({'class': 0, 'obj_xpath': seed_obj_xpath, 'obj_features': obj_features,
-                                              'pred_xpath': random_pred_xpath, 'pred_features': pred_features, 'obj_text': obj_text, 'pred_text': pred_text})
-
-
-            # print('   {}'.format(webpage['topic_text']))
-            # print('      template: {}'.format(template))
-            # print('      file: {}'.format(webpage['file_name']))
-            # print('      seed: {}'.format([(seed['obj_text'], seed['pred_text']) for seed in seeds]))
-            # print('      not_seed: {}'.format([(not_seed['obj_text'], not_seed['pred_text']) for not_seed in not_seeds]))
-
             # build training set
-            page_training = seeds + not_seeds
+            page_training = get_webpage_seeds_labels(candidate_pairs, webpage)
             page_training_x = [{'obj_features': data_point['obj_features'], 'pred_features': data_point['pred_features'], 'obj_text': data_point['obj_text'], 'pred_text': data_point['pred_text'], 'obj_xpath': data_point['obj_xpath'], 'pred_xpath': data_point['pred_xpath']} for data_point in page_training]
             page_training_y = [data_point['class'] for data_point in page_training]
 
