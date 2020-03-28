@@ -1,0 +1,107 @@
+main:
+    manage_docker: true
+    preprocess_kb: true
+    import_kb_graphdb: true
+    import_kb_solr: true
+    import_dataset_mongodb: true
+    compute_term_freq_indexes: true
+    compute_page_entities: true
+    topic_identification: true
+    compute_candidate_pred_obj_pairs: true
+    compute_seed_labels: true
+    label_propagation: true
+    save_new_labels_in_kb: false
+    crowdsourcing: false
+
+import_kb:                                                                  # knowledge graph to use
+    kb_source: swde                                                         # swde, freebase_easy, monitor
+    ssd_disk: true
+
+mongodb_importer:                                                           # evaluation dataset to use
+    dataset: swde                                                           # swde, monitor
+
+swde:                                                                       # swde dataset importer configs
+    db: openceres
+    collection: swde
+    debug: true
+    domain:
+        - movie
+    sites: ['imdb', 'allmovie', 'hollywood', 'iheartmovies']                # (default:[])
+    max_number_of_webpages: 44                                              # (default:0) foreach domain
+    topics_to_import: []                                                    # select only webpages that have one of this topics as subject (default:[])
+
+monitor:                                                                    # monitor dataset importer configs
+    max_number_of_webpages: 300                                             # (default:0)
+    sites: ['www.nexus-t.co.uk', 'www.ebay.com', 'www.pc-canada.com']
+
+page_entities:
+    debug: false
+    overwrite_page_entities: true
+    ignore_too_common_text_node: true
+    common_text_node_freq_threshold: 0.50                                   # a node can be a obj if his freq is less than 50%
+
+topic_identification:
+    debug: false
+    use_ground_truth: true
+    domains: []
+
+candidate_pred_obj_pairs:
+    debug: false
+    min_pred_candidates_freq: 0.10                                          # pred candidates must compare on 10% of webpages (of that template)
+    max_obj_candidates_freq: 0.90                                           # a text_node could be a obj if his text is in less than 40% of pages
+    candidate_preds_foreach_obj: 3
+    domains: []
+    templates: []
+
+seed_labels:
+    debug: true
+    min_redundancy_pages: 3                                                 # consider only pred that comes at least from min_redundancy_pages different pages
+    filter_pred_syns_factor: 0.5                                            # 0: get all pred_synonims, 1: get only syns with max score
+    redundancy_against_distance: 0.21                                       # in the selection of the best pred candidate for an obj
+    intradomain_redundancy_against_interdomain: 1
+    templates: []                                                           # put [] for all
+    domains: []
+    plot_redundancy_score_histogram: false
+
+save_new_labels_in_kb:
+    debug: true
+
+
+# ======================== DON'T TOUCH
+neo4j:
+    bolt: bolt://localhost:7687
+    user: neo4j
+    psw: test
+
+solr:
+    host: http://localhost:8983/solr/
+
+mongodb:
+    host: mongodb://localhost:27017/
+    user: root
+    psw: example
+    db_name: openceres
+
+selenium:
+    load_page_timeout: 30
+
+kb_preprocessor:
+    output_dir_path: generated_data/knowledge_base/
+
+preprocessor_freebase_exq:
+    vertices_input_path: input_data/freebase_exq/freebase-nodes-in-out-name-first10.tsv
+    edges_input_path: input_data/freebase_exq/freebase-sout-first10.graph
+    edges_text_input_path: input_data/freebase_exq/freebase-labels.tsv
+
+preprocessor_freebase_easy:
+    vertices_input_path: input_data/freebase_easy/freebase-links.txt
+    edges_input_path: input_data/freebase_easy/facts.txt
+
+preprocessor_swde:
+    groundtruth_path: input_data/swde/groundtruth/
+    domains: {movie: 'title', university: 'name', nbaplayer: 'name'}                       # {domain: main_annotation_file}
+    sites: ['imdb', 'collegeboard', 'espn']                                       # put max one site foreach domain
+
+preprocessor_imdb:
+    groundtruth_path: input_data/swde_extended/movie/movie-imdb(2000).json
+# ======================== DON'T TOUCH

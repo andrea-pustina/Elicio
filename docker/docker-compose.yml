@@ -1,0 +1,52 @@
+version: '3.6'
+
+services:
+  neo4j:
+    image: neo4j:3.5.3
+    restart: always
+    ports:
+      - 7474:7474
+      - 7687:7687
+    environment:
+      - NEO4J_AUTH=neo4j/test
+#      - NEO4J_dbms_memory_heap_initial__size=8G
+#      - NEO4J_dbms_memory_heap_max__size=8G
+#      - NEO4J_dbms_memory_pagecache_size=4G
+    volumes:
+      - ../generated_data/docker/neo4j/data:/data
+      - ../generated_data/docker/neo4j/logs:/logs
+      - ../generated_data/docker/neo4j/import:/var/lib/neo4j/import
+      - ../generated_data/docker/neo4j/plugins:/plugins
+      - ../generated_data/knowledge_base:/var/lib/neo4j/import/knowledge_base
+
+  solr:
+    image: solr:8.2.0
+    ports:
+     - "8983:8983"
+    environment:
+      - SOLR_HOME=/opt/solr/server/solr/
+    volumes:
+      - ../generated_data/docker/solr/data:/opt/solr/server/solr/mycores
+#      - ../generated_data/freebase_exq:/freebase_exq
+
+  mongo:
+    image: mongo:4.2.0
+    restart: always
+    command: --bind_ip=0.0.0.0
+    ports: 
+      - 27017:27017
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+    volumes:
+      - ../generated_data/docker/mongo/data:/data/db
+
+  mongo-express:
+    image: mongo-express:0.49.0
+    restart: always
+    ports:
+      - 8081:8081
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: root
+      ME_CONFIG_MONGODB_ADMINPASSWORD: example
+
