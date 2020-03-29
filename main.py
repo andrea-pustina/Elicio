@@ -16,7 +16,7 @@ import src.knowledge_base.solr_importer as kb_solr_importer
 import src.pipeline.seed_labels.seed_labels as seed_labels
 import src.pipeline.page_entities as page_entities
 import src.pipeline.candidate_pred_obj_pairs as candidate_pred_obj_pairs
-import src.pipeline.label_propagation_classification as label_propagation
+import src.pipeline.label_propagation_clustering as label_propagation
 import src.pipeline.new_labels_kb_saver as new_labels_saver
 import src.pipeline.crowdsourcing as crowdsourcing
 from src.html.webpage_selenium import SeleniumDriver
