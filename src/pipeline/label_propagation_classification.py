@@ -257,6 +257,166 @@ def get_webpage_seeds_labels(candidate_pairs, webpage):
     return page_training
 
 
+def get_similarity(features_obj1, features_pred1, features_obj2, features_pred2):
+    similarity = 0
+
+    # dom similarity
+    if features_obj1['dom'] == features_obj2['dom'] and features_pred1['dom'] == features_pred2['dom']:
+        pass
+    else:
+        return 0
+
+    # graphic similarity
+    if features_pred1['graphic'] == features_pred2['graphic']:
+        similarity += 1
+
+    # horizontal similarity
+    pair1_horizontal_distances = features_pred1['distances']['horizontal']
+    pair2_horizontal_distances = features_pred2['distances']['horizontal']
+
+    horizontal_similarity = 0
+    for distance1 in pair1_horizontal_distances.values():
+        for distance2 in pair2_horizontal_distances.values():
+            distance1 = abs(distance1)
+            distance2 = abs(distance2)
+
+            curr_sim = max(0, min(distance1, distance2) / max(distance1, distance2)) if max(distance1, distance2) != 0 else 0
+            horizontal_similarity = max(horizontal_similarity, curr_sim)
+
+    similarity += horizontal_similarity
+
+    # vertical similarity
+    pair1_vertical_distances = features_pred1['distances']['vertical']
+    pair2_vertical_distances = features_pred2['distances']['vertical']
+
+    vertical_similarity = 0
+    for distance1 in pair1_vertical_distances.values():
+        for distance2 in pair2_vertical_distances.values():
+            distance1 = abs(distance1)
+            distance2 = abs(distance2)
+
+            curr_sim = max(0, min(distance1, distance2) / max(distance1, distance2)) if max(distance1, distance2) != 0 else 0
+            vertical_similarity = max(vertical_similarity, curr_sim)
+
+    similarity += vertical_similarity
+
+    return similarity
+
+
+def get_training_set(page_service, template, webpage_index, tag_encoder):
+    training_x = []
+    training_y = []
+
+    for webpage in page_service.get_all(template=template):
+        if 'candidate_pairs' not in webpage:
+            continue
+
+        parsed_page = ParsedPage(webpage['html'])
+
+        # get list of candidate pred-obj pairs -> candidate_pairs = {obj_xpath: {obj_text: 'avatar', obj_features: {...}, candidate_preds: {pred_xpath: {pred_text: 'film', pred_features: {...}}, ... } }}
+        candidate_pairs = get_candidate_pred_obj_pairs(webpage, parsed_page)
+
+        # build training set
+        page_training = get_webpage_seeds_labels(candidate_pairs, webpage)
+        page_training_x = [{'obj_features': data_point['obj_features'], 'pred_features': data_point['pred_features'],
+                            'obj_text': data_point['obj_text'], 'pred_text': data_point['pred_text'],
+                            'obj_xpath': data_point['obj_xpath'], 'pred_xpath': data_point['pred_xpath']} for data_point
+                           in page_training]
+        page_training_y = [data_point['class'] for data_point in page_training]
+
+        training_x.extend(page_training_x)
+        training_y.extend(page_training_y)
+
+    # get features names to be sure to get features in the same order
+    dom_features_names = list(training_x[0]['obj_features']['dom'].keys())
+    distance_features_names = list(training_x[0]['pred_features']['distances']['vertical'].keys()) + list(
+        training_x[0]['pred_features']['distances']['horizontal'].keys())
+
+    # distance_features_names.remove('left-left')
+    # distance_features_names.remove('left-right')
+    # distance_features_names.remove('right-right')
+    # distance_features_names.remove('up-up')
+    # distance_features_names.remove('up-down')
+    # distance_features_names.remove('down-down')
+
+    # distance_features_names = ['origin_distance']
+
+    # label encoders are used to tranform categorical features into numbers (ex 'san serif' -> 0 , 'times new roman' -> 1)
+    # dom_label_encoders = {dom_feature1: label_encoder1, dom_feature2:...}
+    dom_label_encoders = get_dom_label_encoders(page_service, template)
+
+    # get max distance to normalize all distances
+    max_distance_features_value = get_max_distance_feature_value(page_service, template)
+
+    # get features encoded foreach datapoint
+    training_x_encoded = []
+    for data_point in training_x:
+        obj_text = data_point['obj_text']
+        pred_text = data_point['pred_text']
+        datapoint_features_encoded = clean_datapoint_features(data_point, dom_features_names, dom_label_encoders,
+                                                              distance_features_names, max_distance_features_value,
+                                                              webpage_index, template, obj_text, pred_text, tag_encoder)
+        training_x_encoded.append(datapoint_features_encoded)
+
+    return training_x_encoded, training_y, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value
+
+
+def do_classification(page_service, template, webpage_index, model, tag_encoder, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value):
+    # compute score foreach pred candidate foreach obj
+    for webpage in page_service.get_all(template=template):
+        if 'candidate_pairs' not in webpage:
+            continue
+
+        for obj_xpath, obj_metadata in webpage['candidate_pairs'].items():
+            obj_features = obj_metadata['features']
+            obj_text = obj_metadata['obj_text']
+
+            pred_candidates = obj_metadata['pred_candidates']
+            for pred_candidate in pred_candidates:
+                pred_features = pred_candidate['features']
+                pred_text = pred_candidate['text']
+                pred_xpath = pred_candidate['node']
+
+                data_point = {'obj_features': obj_features, 'pred_features': pred_features, 'obj_xpath': obj_xpath,
+                              'pred_xpath': pred_xpath}
+                data_point_features = clean_datapoint_features(data_point, dom_features_names, dom_label_encoders,
+                                                               distance_features_names, max_distance_features_value,
+                                                               webpage_index, template, obj_text, pred_text,
+                                                               tag_encoder)
+                pred_score = model.predict([data_point_features])[0]
+
+                # print(pred_score)
+                pred_candidate['score'] = float(pred_score)
+
+        page_service.save(webpage)
+
+    # foreach obj select pred from pred candidates
+    for webpage in page_service.get_all(template=template):
+        if 'candidate_pairs' not in webpage:
+            continue
+
+        page_new_pred_obj_pairs = []
+
+        for obj_xpath, obj_metadata in webpage['candidate_pairs'].items():
+            obj_text = obj_metadata['obj_text']
+
+            pred_candidates = obj_metadata['pred_candidates']
+            if len(pred_candidates) > 0:
+                best_pred_candidate = max(pred_candidates, key=lambda pred_candidate: pred_candidate['score'])
+
+                best_pred_candidate_xpath = best_pred_candidate['node']
+                best_pred_candidate_text = best_pred_candidate['text']
+                best_pred_candidate_score = best_pred_candidate['score']
+
+                if best_pred_candidate_score > 0:
+                    page_new_pred_obj_pairs.append(
+                        {'obj_xpath': obj_xpath, 'pred_xpath': best_pred_candidate_xpath, 'obj_text': obj_text,
+                         'pred_text': best_pred_candidate_text})
+
+        webpage['new_labels'] = page_new_pred_obj_pairs
+        page_service.save(webpage)
+
+
 def propagate_labels(page_service, cfg, webpage_index):
     print('propagating labels...')
     templates = page_service.get_all_field_values('template')
@@ -265,57 +425,7 @@ def propagate_labels(page_service, cfg, webpage_index):
     tag_encoder = get_html_tag_encoder(page_service)
 
     for template in templates:
-
-        training_x = []
-        training_y = []
-
-        for webpage in page_service.get_all(template=template):
-            if 'candidate_pairs' not in webpage:
-                continue
-
-            parsed_page = ParsedPage(webpage['html'])
-
-            # get list of candidate pred-obj pairs -> candidate_pairs = {obj_xpath: {obj_text: 'avatar', obj_features: {...}, candidate_preds: {pred_xpath: {pred_text: 'film', pred_features: {...}}, ... } }}
-            candidate_pairs = get_candidate_pred_obj_pairs(webpage, parsed_page)
-
-            # build training set
-            page_training = get_webpage_seeds_labels(candidate_pairs, webpage)
-            page_training_x = [{'obj_features': data_point['obj_features'], 'pred_features': data_point['pred_features'], 'obj_text': data_point['obj_text'], 'pred_text': data_point['pred_text'], 'obj_xpath': data_point['obj_xpath'], 'pred_xpath': data_point['pred_xpath']} for data_point in page_training]
-            page_training_y = [data_point['class'] for data_point in page_training]
-
-            training_x.extend(page_training_x)
-            training_y.extend(page_training_y)
-
-        if len(training_x) == 0:
-            continue
-
-        # get features names to be sure to get features in the same order
-        dom_features_names = list(training_x[0]['obj_features']['dom'].keys())
-        distance_features_names = list(training_x[0]['pred_features']['distances']['vertical'].keys()) + list(training_x[0]['pred_features']['distances']['horizontal'].keys())
-
-        # distance_features_names.remove('left-left')
-        # distance_features_names.remove('left-right')
-        # distance_features_names.remove('right-right')
-        # distance_features_names.remove('up-up')
-        # distance_features_names.remove('up-down')
-        # distance_features_names.remove('down-down')
-
-        #distance_features_names = ['origin_distance']
-
-        # label encoders are used to tranform categorical features into numbers (ex 'san serif' -> 0 , 'times new roman' -> 1)
-        # dom_label_encoders = {dom_feature1: label_encoder1, dom_feature2:...}
-        dom_label_encoders = get_dom_label_encoders(page_service, template)
-
-        # get max distance to normalize all distances
-        max_distance_features_value = get_max_distance_feature_value(page_service, template)
-
-        # get features encoded foreach datapoint
-        training_x_encoded = []
-        for data_point in training_x:
-            obj_text = data_point['obj_text']
-            pred_text = data_point['pred_text']
-            datapoint_features_encoded = clean_datapoint_features(data_point, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value, webpage_index, template, obj_text, pred_text, tag_encoder)
-            training_x_encoded.append(datapoint_features_encoded)
+        training_x_encoded, training_y, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value = get_training_set(page_service, template, webpage_index, tag_encoder)
 
         # train ml model
         model = GaussianNB()                            # naive bayes
@@ -324,53 +434,7 @@ def propagate_labels(page_service, cfg, webpage_index):
         # model = svm.SVC(gamma='scale')
         # model.fit(training_x_encoded, training_y)
 
-        # compute score foreach pred candidate foreach obj
-        for webpage in page_service.get_all(template=template):
-            if 'candidate_pairs' not in webpage:
-                continue
-
-            for obj_xpath, obj_metadata in webpage['candidate_pairs'].items():
-                obj_features = obj_metadata['features']
-                obj_text = obj_metadata['obj_text']
-
-                pred_candidates = obj_metadata['pred_candidates']
-                for pred_candidate in pred_candidates:
-                    pred_features = pred_candidate['features']
-                    pred_text = pred_candidate['text']
-                    pred_xpath = pred_candidate['node']
-
-                    data_point = {'obj_features': obj_features, 'pred_features': pred_features, 'obj_xpath': obj_xpath, 'pred_xpath': pred_xpath}
-                    data_point_features = clean_datapoint_features(data_point, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value, webpage_index, template, obj_text, pred_text, tag_encoder)
-                    pred_score = model.predict([data_point_features])[0]
-
-                    # print(pred_score)
-                    pred_candidate['score'] = float(pred_score)
-
-            page_service.save(webpage)
-
-        # foreach obj select pred from pred candidates
-        for webpage in page_service.get_all(template=template):
-            if 'candidate_pairs' not in webpage:
-                continue
-
-            page_new_pred_obj_pairs = []
-
-            for obj_xpath, obj_metadata in webpage['candidate_pairs'].items():
-                obj_text = obj_metadata['obj_text']
-
-                pred_candidates = obj_metadata['pred_candidates']
-                if len(pred_candidates) > 0:
-                    best_pred_candidate = max(pred_candidates, key=lambda pred_candidate: pred_candidate['score'])
-
-                    best_pred_candidate_xpath = best_pred_candidate['node']
-                    best_pred_candidate_text = best_pred_candidate['text']
-                    best_pred_candidate_score = best_pred_candidate['score']
-
-                    if best_pred_candidate_score > 0:
-                        page_new_pred_obj_pairs.append({'obj_xpath': obj_xpath, 'pred_xpath': best_pred_candidate_xpath, 'obj_text': obj_text, 'pred_text': best_pred_candidate_text})
-
-            webpage['new_labels'] = page_new_pred_obj_pairs
-            page_service.save(webpage)
+        do_classification(page_service, template, webpage_index,model, tag_encoder, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value)
 
     for template in templates:
         evaluate_results(page_service, template=template)

@@ -7,6 +7,9 @@ from sklearn.naive_bayes import GaussianNB
 import random
 import src.utils.string_utils as string_utils
 from statistics import mean
+import src.utils.elapsed_timer as timer
+from community import community_louvain
+import networkx as nx
 
 
 def get_candidate_pred_obj_pairs(webpage, parsed_page):
@@ -303,18 +306,48 @@ def get_similarity(features_obj1, features_pred1, features_obj2, features_pred2)
     return similarity
 
 
-def get_training_set(page_service, template, webpage_index, tag_encoder):
+def get_training_set(page_service, template, webpage_index, tag_encoder, cluster_candidate_pairs):
     training_x = []
     training_y = []
+
+    # # change candidate_preds format
+    # formatted_candidate_pairs = {}
+    # for candidate_pair in candidate_pairs:
+    #     formatted_candidate_pairs[candidate_pair['obj_xpath']] = {
+    #         'obj_text': candidate_pair['obj_text'],
+    #         'obj_features': candidate_pair['obj_features'],
+    #         'candidate_preds': {}
+    #     }
+    #
+    # for obj_xpath in formatted_candidate_pairs.keys():
+    #     obj_candidate_pairs = filter(lambda candidate_pair: candidate_pair['obj_xpath']==obj_xpath, candidate_pairs)
+    #     for obj_candidate_pair in obj_candidate_pairs:
+    #         pred_xpath = obj_candidate_pair['pred_xpath']
+    #
+    #         formatted_candidate_pairs[obj_xpath]['candidate_preds'][pred_xpath] = {
+    #             'pred_text': obj_candidate_pair['pred_text'],
+    #             'pred_features': obj_candidate_pair['prd_features']
+    #         }
+    #
+
+
 
     for webpage in page_service.get_all(template=template):
         if 'candidate_pairs' not in webpage:
             continue
 
+        page_file_name = webpage['file_name']
         parsed_page = ParsedPage(webpage['html'])
 
         # get list of candidate pred-obj pairs -> candidate_pairs = {obj_xpath: {obj_text: 'avatar', obj_features: {...}, candidate_preds: {pred_xpath: {pred_text: 'film', pred_features: {...}}, ... } }}
         candidate_pairs = get_candidate_pred_obj_pairs(webpage, parsed_page)
+
+        # get only candidate_pairs of the cluster
+        page_cluster_candidate_pairs = filter(lambda cluster_candidate_pair: cluster_candidate_pair['page_file_name']==page_file_name, cluster_candidate_pairs)
+        page_cluster_candidate_pairs_obj_xpaths = list(map(lambda candidate_pair: candidate_pair['obj_xpath'], page_cluster_candidate_pairs))
+        #candidate_pairs = dict(filter(lambda candidate_pair: candidate_pair[0] in page_cluster_candidate_pairs_obj_xpaths, candidate_pairs.items()))
+        candidate_pairs = {k: v for k, v in candidate_pairs.items() if k in page_cluster_candidate_pairs_obj_xpaths}
+        print('cluster_candidate_pairs: {} elements'.format(len(candidate_pairs)))
 
         # build training set
         page_training = get_webpage_seeds_labels(candidate_pairs, webpage)
@@ -328,9 +361,12 @@ def get_training_set(page_service, template, webpage_index, tag_encoder):
         training_y.extend(page_training_y)
 
     # get features names to be sure to get features in the same order
-    dom_features_names = list(training_x[0]['obj_features']['dom'].keys())
-    distance_features_names = list(training_x[0]['pred_features']['distances']['vertical'].keys()) + list(
-        training_x[0]['pred_features']['distances']['horizontal'].keys())
+    if len(training_x) > 0:
+        dom_features_names = list(training_x[0]['obj_features']['dom'].keys())
+        distance_features_names = list(training_x[0]['pred_features']['distances']['vertical'].keys()) + list(training_x[0]['pred_features']['distances']['horizontal'].keys())
+    else:
+        dom_features_names = []
+        distance_features_names = []
 
     # distance_features_names.remove('left-left')
     # distance_features_names.remove('left-right')
@@ -361,73 +397,172 @@ def get_training_set(page_service, template, webpage_index, tag_encoder):
     return training_x_encoded, training_y, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value
 
 
+def do_classification(page_service, template, webpage_index, model, tag_encoder, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value, cluster_candidate_pairs):
+    # compute score foreach pred candidate foreach obj
+    for webpage in page_service.get_all(template=template):
+        if 'candidate_pairs' not in webpage:
+            continue
+
+        # get only candidate_pairs of the cluster
+        page_file_name = webpage['file_name']
+        page_cluster_candidate_pairs = filter(lambda cluster_candidate_pair: cluster_candidate_pair['page_file_name']==page_file_name, cluster_candidate_pairs)
+        page_cluster_candidate_pairs_obj_xpaths = list(map(lambda candidate_pair: candidate_pair['obj_xpath'], page_cluster_candidate_pairs))
+
+
+        for obj_xpath, obj_metadata in webpage['candidate_pairs'].items():
+            if not obj_xpath in page_cluster_candidate_pairs_obj_xpaths:
+                continue
+
+            obj_features = obj_metadata['features']
+            obj_text = obj_metadata['obj_text']
+
+            pred_candidates = obj_metadata['pred_candidates']
+            for pred_candidate in pred_candidates:
+                pred_features = pred_candidate['features']
+                pred_text = pred_candidate['text']
+                pred_xpath = pred_candidate['node']
+
+                data_point = {'obj_features': obj_features, 'pred_features': pred_features, 'obj_xpath': obj_xpath,
+                              'pred_xpath': pred_xpath}
+                data_point_features = clean_datapoint_features(data_point, dom_features_names, dom_label_encoders,
+                                                               distance_features_names, max_distance_features_value,
+                                                               webpage_index, template, obj_text, pred_text,
+                                                               tag_encoder)
+                pred_score = model.predict([data_point_features])[0]
+
+                # print(pred_score)
+                pred_candidate['score'] = float(pred_score)
+
+        page_service.save(webpage)
+
+    # foreach obj select pred from pred candidates
+    for webpage in page_service.get_all(template=template):
+        if 'candidate_pairs' not in webpage:
+            continue
+
+        page_new_pred_obj_pairs = []
+
+        for obj_xpath, obj_metadata in webpage['candidate_pairs'].items():
+            if not obj_xpath in page_cluster_candidate_pairs_obj_xpaths:
+                continue
+
+            obj_text = obj_metadata['obj_text']
+
+            pred_candidates = obj_metadata['pred_candidates']
+            if len(pred_candidates) > 0:
+                best_pred_candidate = max(pred_candidates, key=lambda pred_candidate: pred_candidate['score'])
+
+                best_pred_candidate_xpath = best_pred_candidate['node']
+                best_pred_candidate_text = best_pred_candidate['text']
+                best_pred_candidate_score = best_pred_candidate['score']
+
+                if best_pred_candidate_score > 0:
+                    page_new_pred_obj_pairs.append(
+                        {'obj_xpath': obj_xpath, 'pred_xpath': best_pred_candidate_xpath, 'obj_text': obj_text,
+                         'pred_text': best_pred_candidate_text})
+
+        webpage['new_labels'] = page_new_pred_obj_pairs
+        page_service.save(webpage)
+
+
+def candidate_pairs_clustering(page_service, template):
+    g = nx.Graph()
+
+    # get all candidate pairs which obj is not in seed labels
+    print('computing_nodes...', end='')
+    curr_id = 0
+    candidate_pairs = {}
+    for webpage in page_service.get_all(template=template):
+        if 'candidate_pairs' not in webpage:
+            continue
+
+        new_labels_obj_xpaths = [x['obj_xpath'] for x in webpage['new_labels']]
+
+        for obj_xpath, obj_data in webpage['candidate_pairs'].items():
+            for pred_data in obj_data['pred_candidates']:
+                pred_xpath = pred_data['node']
+
+                if obj_xpath not in webpage['seed_labels'] and obj_xpath not in new_labels_obj_xpaths:
+                    candidate_pair = {}
+                    candidate_pair['obj_xpath'] = obj_xpath
+                    candidate_pair['pred_xpath'] = pred_xpath
+                    candidate_pair['obj_text'] = obj_data['obj_text']
+                    candidate_pair['pred_text'] = pred_data['text']
+
+                    candidate_pair['obj_features'] = obj_data['features']
+                    candidate_pair['pred_features'] = pred_data['features']
+
+                    candidate_pair['page_file_name'] = webpage['file_name']
+                    candidate_pair['page_topic_id'] = webpage['topic_id']
+                    candidate_pair['page_topic_text'] = webpage['topic_text']
+
+                    candidate_pairs[curr_id] = candidate_pair
+                    curr_id += 1
+    print('ok')
+
+    print('add_nodes...', end='')
+    g.add_nodes_from(candidate_pairs.keys())
+    print('ok')
+
+    print('computing_edges...')
+    total_operation_count = pow(curr_id + 1, 2)
+    status_printer = timer.StatusPrinter(total_operation_count, padding='      ')
+    edges = []
+    for pair1_id, pair1 in candidate_pairs.items():
+        for pair2_id, pair2 in candidate_pairs.items():
+            if pair1['obj_xpath'] == pair2['obj_xpath'] and pair1['pred_xpath'] == pair2['pred_xpath']:
+                continue
+
+            pairs_similarity = get_similarity(pair1['obj_features'], pair1['pred_features'], pair2['obj_features'],
+                                              pair2['pred_features'])
+
+            if pairs_similarity > 0:
+                edges.append((pair1_id, pair2_id, pairs_similarity))
+
+            status_printer.operation_done()
+    status_printer.finish()
+
+    print('add_edges...', end='')
+    g.add_weighted_edges_from(edges)
+    print('ok')
+
+    print('clustering...', end='')
+    pairs_clusters = community_louvain.best_partition(g)
+    print('ok')
+
+    clusters = set()
+    for id, cluster in pairs_clusters.items():
+        candidate_pairs[id]['cluster'] = cluster
+        clusters.add(cluster)
+
+    return candidate_pairs.values(), clusters
+
+
 def propagate_labels(page_service, cfg, webpage_index):
     print('propagating labels...')
     templates = page_service.get_all_field_values('template')
-    # templates = ['monitor-www.nexus-t.co.uk', 'monitor-www.pc-canada.com']
 
     tag_encoder = get_html_tag_encoder(page_service)
 
     for template in templates:
+        candidate_pairs, clusters = candidate_pairs_clustering(page_service, template)
 
+        for cluster in clusters:
+            print('cluster: {}'.format(cluster))
+            cluster_candidate_pairs = list(filter(lambda candidate_pair: candidate_pair['cluster']==cluster, candidate_pairs))
+            print('   cluster_candidate_pairs: {}'.format(cluster_candidate_pairs))
 
+            training_x_encoded, training_y, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value = get_training_set(page_service, template, webpage_index, tag_encoder, cluster_candidate_pairs)
 
-        training_x_encoded, training_y, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value = get_training_set(page_service, template, webpage_index, tag_encoder)
-
-        # train ml model
-        model = GaussianNB()                            # naive bayes
-        model.fit(training_x_encoded, training_y)
-
-        # model = svm.SVC(gamma='scale')
-        # model.fit(training_x_encoded, training_y)
-
-        # compute score foreach pred candidate foreach obj
-        for webpage in page_service.get_all(template=template):
-            if 'candidate_pairs' not in webpage:
+            print('   cluster_training_x_encoded: {}'.format(training_x_encoded))
+            if len(training_x_encoded) <= 0:
                 continue
 
-            for obj_xpath, obj_metadata in webpage['candidate_pairs'].items():
-                obj_features = obj_metadata['features']
-                obj_text = obj_metadata['obj_text']
+            # train ml model
+            model = GaussianNB()                            # naive bayes
+            model.fit(training_x_encoded, training_y)
 
-                pred_candidates = obj_metadata['pred_candidates']
-                for pred_candidate in pred_candidates:
-                    pred_features = pred_candidate['features']
-                    pred_text = pred_candidate['text']
-                    pred_xpath = pred_candidate['node']
-
-                    data_point = {'obj_features': obj_features, 'pred_features': pred_features, 'obj_xpath': obj_xpath, 'pred_xpath': pred_xpath}
-                    data_point_features = clean_datapoint_features(data_point, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value, webpage_index, template, obj_text, pred_text, tag_encoder)
-                    pred_score = model.predict([data_point_features])[0]
-
-                    # print(pred_score)
-                    pred_candidate['score'] = float(pred_score)
-
-            page_service.save(webpage)
-
-        # foreach obj select pred from pred candidates
-        for webpage in page_service.get_all(template=template):
-            if 'candidate_pairs' not in webpage:
-                continue
-
-            page_new_pred_obj_pairs = []
-
-            for obj_xpath, obj_metadata in webpage['candidate_pairs'].items():
-                obj_text = obj_metadata['obj_text']
-
-                pred_candidates = obj_metadata['pred_candidates']
-                if len(pred_candidates) > 0:
-                    best_pred_candidate = max(pred_candidates, key=lambda pred_candidate: pred_candidate['score'])
-
-                    best_pred_candidate_xpath = best_pred_candidate['node']
-                    best_pred_candidate_text = best_pred_candidate['text']
-                    best_pred_candidate_score = best_pred_candidate['score']
-
-                    if best_pred_candidate_score > 0:
-                        page_new_pred_obj_pairs.append({'obj_xpath': obj_xpath, 'pred_xpath': best_pred_candidate_xpath, 'obj_text': obj_text, 'pred_text': best_pred_candidate_text})
-
-            webpage['new_labels'] = page_new_pred_obj_pairs
-            page_service.save(webpage)
+            do_classification(page_service, template, webpage_index,model, tag_encoder, dom_features_names, dom_label_encoders, distance_features_names, max_distance_features_value, cluster_candidate_pairs)
 
     for template in templates:
         evaluate_results(page_service, template=template)
